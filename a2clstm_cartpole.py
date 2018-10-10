@@ -9,16 +9,18 @@ import random
 import os
 import gym
 
-# Hyper Parameters
-STATE_DIM = 4;
+# delete cart velocity state observation
+# made a standard cartpole env as POMDP!!!!!!!!!!!!!!!!!!!
+STATE_DIM = 4-1;
 ACTION_DIM = 2;
-STEP = 50;
+STEP = 5000;
 SAMPLE_NUMS = 1000;
 TIMESTEP = 8;
 A_HIDDEN = 40;
 C_HIDDEN = 40;
 
 
+# actor using a LSTM + fc network architecture to estimate hidden states.
 class ActorNetwork(nn.Module):
 
     def __init__(self,in_size,hidden_size,out_size):
@@ -32,6 +34,7 @@ class ActorNetwork(nn.Module):
         x = F.log_softmax(x,2)
         return x, hidden
 
+# critic using a LSTM + fc network architecture to estimate hidden states.
 class ValueNetwork(nn.Module):
 
     def __init__(self,in_size,hidden_size,out_size):
@@ -45,27 +48,25 @@ class ValueNetwork(nn.Module):
         return x, hidden
 
 def roll_out(actor_network,task,sample_nums,value_network,init_state):
-    #task.reset()
     states = []
     actions = []
     rewards = []
     is_done = False
     final_r = 0
     state = init_state
-    a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-    a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-    c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
-    c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+    a_hx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+    a_cx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+    c_hx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+    c_cx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
 
     for j in range(sample_nums):
         states.append(state)
         log_softmax_action, (a_hx,a_cx) = actor_network(Variable(torch.Tensor([state]).unsqueeze(0)), (a_hx,a_cx))
-        # print(log_softmax_action)
         softmax_action = torch.exp(log_softmax_action)
-        # print(softmax_action.cpu().data.numpy()[0][0])
         action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0][0])
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         next_state,reward,done,_ = task.step(action)
+        next_state = np.delete(next_state, 1)
         #fix_reward = -10 if done else 1
         actions.append(one_hot_action)
         rewards.append(reward)
@@ -74,10 +75,14 @@ def roll_out(actor_network,task,sample_nums,value_network,init_state):
         if done:
             is_done = True
             state = task.reset()
-            a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-            a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-            c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
-            c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+            state = np.delete(state,1)
+            a_hx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+            a_cx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+            c_hx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+            c_cx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+
+            #print score while training
+            print(j+1)
             break
     if not is_done:
         c_out, (c_hx,c_cx) = value_network(Variable(torch.Tensor([final_state])), (c_hx,c_cx))
@@ -96,10 +101,12 @@ def main():
     # init a task generator for data fetching
     task = gym.make("CartPole-v0")
     init_state = task.reset()
+    init_state = np.delete(init_state,1)
+    
 
     # init value network
     value_network = ValueNetwork(in_size=STATE_DIM, hidden_size=C_HIDDEN, out_size=1)
-    value_network_optim = torch.optim.Adam(value_network.parameters(),lr=0.001)
+    value_network_optim = torch.optim.Adam(value_network.parameters(),lr=0.01)
 
     # init actor network
     actor_network = ActorNetwork(STATE_DIM, A_HIDDEN, ACTION_DIM)
@@ -116,10 +123,10 @@ def main():
         states_var = Variable(torch.Tensor(states).view(-1,STATE_DIM)).unsqueeze(0)
 
         # train actor network
-        a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-        a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-        c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
-        c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_hx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_cx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_hx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_cx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
         actor_network_optim.zero_grad()
         # print(states_var.unsqueeze(0).size())
         log_softmax_actions, (a_hx,a_cx) = actor_network(states_var, (a_hx,a_cx))
@@ -130,13 +137,7 @@ def main():
         qs = qs.view(1, -1, 1)
 
         advantages = qs - vs
-        # print(vs.size())
-        # print(qs.size())
-        # print(advantages.size())
-        # print(log_softmax_actions.size())
-        # print(actions_var.size())
         actor_network_loss = - torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages)
-        print(actor_network_loss)
         actor_network_loss.backward()
         torch.nn.utils.clip_grad_norm(actor_network.parameters(),0.5)
         actor_network_optim.step()
@@ -144,18 +145,14 @@ def main():
         # train value network
         value_network_optim.zero_grad()
         target_values = qs
-        a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-        a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
-        c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
-        c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_hx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_cx = torch.zeros(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_hx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_cx = torch.zeros(C_HIDDEN).unsqueeze(0).unsqueeze(0);
         values, (c_hx,c_cx) = value_network(states_var, (c_hx,c_cx))
 
-        # print( target_values )
-        # print( values )
-        # values.squeeze_(1)
         criterion = nn.MSELoss()
         value_network_loss = criterion(values,target_values)
-        # print(value_network_loss)
         value_network_loss.backward()
         torch.nn.utils.clip_grad_norm(value_network.parameters(),0.5)
         value_network_optim.step()
