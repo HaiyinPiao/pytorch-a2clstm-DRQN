@@ -10,55 +10,39 @@ import os
 import gym
 
 # Hyper Parameters
-STATE_DIM = 4
-ACTION_DIM = 2
-STEP = 2000
-SAMPLE_NUMS = 30
+STATE_DIM = 4;
+ACTION_DIM = 2;
+STEP = 50;
+SAMPLE_NUMS = 1000;
+TIMESTEP = 8;
+A_HIDDEN = 40;
+C_HIDDEN = 40;
 
 
 class ActorNetwork(nn.Module):
 
-    def __init__(self,input_size,hidden_size,action_size):
+    def __init__(self,in_size,hidden_size,out_size):
         super(ActorNetwork, self).__init__()
-        # LSTM Cells
-        self.hidden_size = hidden_size
-        self.hx = None
-        self.cx = None
-        self.lstm = nn.LSTMCell(input_size, hidden_size)
-        self.fc = nn.Linear(hidden_size,action_size)
+        self.lstm = nn.LSTM(in_size, hidden_size, batch_first = True)
+        self.fc = nn.Linear(hidden_size,out_size)
 
-    def reset_history(self):
-        self.hx = Variable(torch.zeros(1, self.hidden_size))
-        self.cx = Variable(torch.zeros(1, self.hidden_size))
-
-    def forward(self,x):
-        # print(x.unsqueeze(0))
-        # x = F.relu(self.fc(x))
-        # x = x.view(x.size(0), -1)
-        # x = x.view(-1, 4)
-        # print(x.size())
-        # print(self.hx)
-        # print(self.cx)
-        self.hx, self.cx = self.lstm(x, (self.hx, self.cx))
-        x = self.hx
-        x = F.relu(self.fc(x))
-        out = F.log_softmax(x)
-
-        return out
+    def forward(self, x, hidden):
+        x, hidden = self.lstm(x, hidden)
+        x = self.fc(x)
+        x = F.log_softmax(x,2)
+        return x, hidden
 
 class ValueNetwork(nn.Module):
 
-    def __init__(self,input_size,hidden_size,output_size):
+    def __init__(self,in_size,hidden_size,out_size):
         super(ValueNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_size,hidden_size)
-        self.fc2 = nn.Linear(hidden_size,hidden_size)
-        self.fc3 = nn.Linear(hidden_size,output_size)
+        self.lstm = nn.LSTM(in_size, hidden_size, batch_first = True)
+        self.fc = nn.Linear(hidden_size,out_size)
 
-    def forward(self,x):
-        out = F.relu(self.fc1(x))
-        out = F.relu(self.fc2(out))
-        out = self.fc3(out)
-        return out
+    def forward(self,x, hidden):
+        x, hidden = self.lstm(x, hidden)
+        x = self.fc(x)
+        return x, hidden
 
 def roll_out(actor_network,task,sample_nums,value_network,init_state):
     #task.reset()
@@ -68,13 +52,18 @@ def roll_out(actor_network,task,sample_nums,value_network,init_state):
     is_done = False
     final_r = 0
     state = init_state
-    actor_network.reset_history()
+    a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+    a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+    c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+    c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
 
     for j in range(sample_nums):
         states.append(state)
-        log_softmax_action = actor_network(Variable(torch.Tensor([state])))
+        log_softmax_action, (a_hx,a_cx) = actor_network(Variable(torch.Tensor([state]).unsqueeze(0)), (a_hx,a_cx))
+        # print(log_softmax_action)
         softmax_action = torch.exp(log_softmax_action)
-        action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0])
+        # print(softmax_action.cpu().data.numpy()[0][0])
+        action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0][0])
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         next_state,reward,done,_ = task.step(action)
         #fix_reward = -10 if done else 1
@@ -85,11 +74,14 @@ def roll_out(actor_network,task,sample_nums,value_network,init_state):
         if done:
             is_done = True
             state = task.reset()
-            actor_network.reset_history()
+            a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+            a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+            c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+            c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
             break
     if not is_done:
-        final_r = value_network(Variable(torch.Tensor([final_state]))).cpu().data.numpy()
-
+        c_out, (c_hx,c_cx) = value_network(Variable(torch.Tensor([final_state])), (c_hx,c_cx))
+        final_r = c_out.cpu().data.numpy()
     return states,actions,rewards,final_r,state
 
 def discount_reward(r, gamma,final_r):
@@ -106,12 +98,12 @@ def main():
     init_state = task.reset()
 
     # init value network
-    value_network = ValueNetwork(input_size = STATE_DIM,hidden_size = 40,output_size = 1)
-    value_network_optim = torch.optim.Adam(value_network.parameters(),lr=0.01)
+    value_network = ValueNetwork(in_size=STATE_DIM, hidden_size=C_HIDDEN, out_size=1)
+    value_network_optim = torch.optim.Adam(value_network.parameters(),lr=0.001)
 
     # init actor network
-    actor_network = ActorNetwork(STATE_DIM,40,ACTION_DIM)
-    actor_network_optim = torch.optim.Adam(actor_network.parameters(),lr = 0.01)
+    actor_network = ActorNetwork(STATE_DIM, A_HIDDEN, ACTION_DIM)
+    actor_network_optim = torch.optim.Adam(actor_network.parameters(),lr = 0.001)
 
     steps =[]
     task_episodes =[]
@@ -120,20 +112,31 @@ def main():
     for step in range(STEP):
         states,actions,rewards,final_r,current_state = roll_out(actor_network,task,SAMPLE_NUMS,value_network,init_state)
         init_state = current_state
-        actions_var = Variable(torch.Tensor(actions).view(-1,ACTION_DIM))
-        states_var = Variable(torch.Tensor(states).view(-1,STATE_DIM))
+        actions_var = Variable(torch.Tensor(actions).view(-1,ACTION_DIM)).unsqueeze(0)
+        states_var = Variable(torch.Tensor(states).view(-1,STATE_DIM)).unsqueeze(0)
 
         # train actor network
+        a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
         actor_network_optim.zero_grad()
-        # log_softmax_actions = actor_network(states_var)
-        # print(states_var[0,:])
-        log_softmax_actions = actor_network(states_var[0,:].unsqueeze(0))
-        vs = value_network(states_var).detach()
+        # print(states_var.unsqueeze(0).size())
+        log_softmax_actions, (a_hx,a_cx) = actor_network(states_var, (a_hx,a_cx))
+        vs, (c_hx,c_cx) = value_network(states_var, (c_hx,c_cx))
+        vs.detach()
         # calculate qs
         qs = Variable(torch.Tensor(discount_reward(rewards,0.99,final_r)))
+        qs = qs.view(1, -1, 1)
 
         advantages = qs - vs
+        # print(vs.size())
+        # print(qs.size())
+        # print(advantages.size())
+        # print(log_softmax_actions.size())
+        # print(actions_var.size())
         actor_network_loss = - torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages)
+        print(actor_network_loss)
         actor_network_loss.backward()
         torch.nn.utils.clip_grad_norm(actor_network.parameters(),0.5)
         actor_network_optim.step()
@@ -141,11 +144,15 @@ def main():
         # train value network
         value_network_optim.zero_grad()
         target_values = qs
-        values = value_network(states_var)
+        a_hx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        a_cx = torch.randn(A_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_hx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        c_cx = torch.randn(C_HIDDEN).unsqueeze(0).unsqueeze(0);
+        values, (c_hx,c_cx) = value_network(states_var, (c_hx,c_cx))
 
         # print( target_values )
         # print( values )
-        values.squeeze_(1)
+        # values.squeeze_(1)
         criterion = nn.MSELoss()
         value_network_loss = criterion(values,target_values)
         # print(value_network_loss)
@@ -153,24 +160,24 @@ def main():
         torch.nn.utils.clip_grad_norm(value_network.parameters(),0.5)
         value_network_optim.step()
 
-        # Testing
-        if (step + 1) % 50== 0:
-                result = 0
-                test_task = gym.make("CartPole-v0")
-                for test_epi in range(10):
-                    state = test_task.reset()
-                    for test_step in range(200):
-                        softmax_action = torch.exp(actor_network(Variable(torch.Tensor([state]))))
-                        #print(softmax_action.data)
-                        action = np.argmax(softmax_action.data.numpy()[0])
-                        next_state,reward,done,_ = test_task.step(action)
-                        result += reward
-                        state = next_state
-                        if done:
-                            break
-                print("step:",step+1,"test result:",result/10.0)
-                steps.append(step+1)
-                test_results.append(result/10)
+        # # Testing
+        # if (step + 1) % 50== 0:
+        #         result = 0
+        #         test_task = gym.make("CartPole-v0")
+        #         for test_epi in range(10):
+        #             state = test_task.reset()
+        #             for test_step in range(200):
+        #                 softmax_action = torch.exp(actor_network(Variable(torch.Tensor([state]))))
+        #                 #print(softmax_action.data)
+        #                 action = np.argmax(softmax_action.data.numpy()[0])
+        #                 next_state,reward,done,_ = test_task.step(action)
+        #                 result += reward
+        #                 state = next_state
+        #                 if done:
+        #                     break
+        #         print("step:",step+1,"test result:",result/10.0)
+        #         steps.append(step+1)
+        #         test_results.append(result/10)
 
 if __name__ == '__main__':
     main()
