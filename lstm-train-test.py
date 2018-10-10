@@ -5,9 +5,9 @@ import torch.optim as optim
 import numpy as np
 
 BATCH = 100;
-TIMESTEP = 10;
-HIDDEN = 3;
-EPOCHS = 50;
+TIMESTEP = 100;
+HIDDEN = 40;
+EPOCHS = 100;
 
 class rnn_wrapper(nn.Module):
 
@@ -25,7 +25,8 @@ class rnn_wrapper(nn.Module):
 
 torch.manual_seed(1)
 
-# 初始化隐藏状态
+#---------------train procedure---------------------------
+#---------------feed lstm by batch-------------------
 hidden_init = (torch.randn(1, BATCH, HIDDEN), torch.randn(1, BATCH, HIDDEN))
 hidden = hidden_init
 # print('Hidden:',hidden)
@@ -54,3 +55,15 @@ for epoch in range(EPOCHS):
     loss.backward()
     
     optimizer.step()
+
+#---------------test procedure---------------------------
+#---------------feed lstm per timestep-------------------
+hx,cx = hidden
+hx = hidden[0].select(1,0).unsqueeze(0);
+cx = hidden[1].select(1,0).unsqueeze(0);
+testin = inn.select(0,0);
+print(testin)
+
+for i in range(TIMESTEP):
+    out, (hx,cx) = rnn(testin.select(0,i).view(1,1,-1), (hx,cx))
+    print(out)
